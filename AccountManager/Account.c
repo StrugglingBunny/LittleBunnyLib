@@ -2,18 +2,23 @@
  * \file   Account.c
  * \brief  Account module
  *
- * - Responsible Engineer:Jeffer Chen
  *
  * - Description: This file implments account
  *
  * - Created on: Feb 12, 2024
  * - Modify from Account C++ vertion by _FASTSHIFT
- * - Author: Jeffer Chen
+ * - This module is not thread safe 
+ * - Author: StrugglingBunny
  */
 #include "HeapManager.h"
+
 #include "PingPongBuffer.h"
 #include "Account.h"
 #include <string.h>
+
+#define _MALLOC heap_mgr_malloc
+#define _FREE heap_mgr_free
+
 #define ACCOUNT_DISCARD_READ_DATA 1
 
 static Account *AccountManager_searchAccount(AccountPoolList *node, const char *ID);
@@ -26,7 +31,7 @@ static AccountManager *g_accountManager = NULL;
  */
 void AccountManager_Init()
 {
-    g_accountManager = (AccountManager *)HeapManager_malloc(sizeof(AccountManager));
+    g_accountManager = (AccountManager *)_MALLOC(sizeof(AccountManager));
     memset(g_accountManager, 0, sizeof(AccountManager));
     if (g_accountManager)
     {
@@ -57,10 +62,10 @@ void AccountManager_DeInit()
             AccountManager_DeleteAccount(node->account->ID);
         }
         tempNode = node->next;
-        HeapManager_free(node);
+        _FREE(node);
         node = tempNode;
     }
-    HeapManager_free(g_accountManager);
+    _FREE(g_accountManager);
     g_accountManager = NULL;
 }
 /**
@@ -75,60 +80,77 @@ bool AccountManager_CreateAccount(const char *id, uint32_t bufSize, void *userDa
     // Check if the account has not been created
     if (AccountManager_searchAccount(node, id) != NULL)
     {
-        DC_LOG_ERROR("Account[%s] has already crated !!!!!!", id);
+        DC_LOG_ERROR("Account[%s] has already created !!!!!!", id);
         return false;
     }
-    Account *account = (Account *)HeapManager_malloc(sizeof(Account));
-    memset(account, 0, sizeof(Account));
-    bool status = false;
-    if (account != NULL)
+
+    // 1. Allocate Account Struct
+    Account *account = (Account *)_MALLOC(sizeof(Account));
+    if (account == NULL)
     {
-        // Set param
-        account->ID = id;
-        account->BufferSize = bufSize;
-        account->eventCb = NULL;
-        account->publishers = NULL;
-        account->subscribers = NULL;
-        // Create a pingpong buffer if needed
-        if (bufSize != 0)
+        DC_LOG_ERROR("Malloc account failed");
+        return false;
+    }
+    memset(account, 0, sizeof(Account));
+
+    // Set basic param
+    account->ID = id;
+    account->BufferSize = bufSize;
+    account->UserData = userData; // Don't forget to set this
+
+    // 2. Allocate Buffer (if needed)
+    void *buffer_mem = NULL;
+    if (bufSize != 0)
+    {
+        buffer_mem = _MALLOC(bufSize * sizeof(uint8_t) * 2);
+        if (buffer_mem == NULL)
         {
-            uint8_t *buffer = (uint8_t *)HeapManager_malloc(bufSize * sizeof(uint8_t) * 2);
-            memset(buffer, 0, bufSize * sizeof(uint8_t) * 2);
-            if (buffer)
-            {
-                memset(buffer, 0, bufSize * sizeof(uint8_t) * 2);
-                uint8_t *buf0 = buffer;
-                uint8_t *buf1 = buffer + bufSize;
-                PingPongBuffer_Init(&account->BufferManager, buf0, buf1);
-                DC_LOG_INFO("Account[%s] cached %d x2 bytes", id, bufSize);
-                account->BufferSize = bufSize;
-            }
+            DC_LOG_ERROR("Malloc buffer failed");
+            goto ErrorHandler_FreeAccount;
         }
-        AccountPoolList *newList = (AccountPoolList *)HeapManager_malloc(sizeof(AccountPoolList));
-        memset(newList, 0, sizeof(AccountPoolList));
-        if (newList)
-        {
-            newList->account = account;
-            newList->next = NULL;
-            // If it is the first account
-            if (g_accountManager->Head == NULL)
-            {
-                g_accountManager->Head = newList;
-            }
-            else
-            {
-                g_accountManager->Tail->next = newList;
-            }
-            g_accountManager->Tail = newList;
-            g_accountManager->AccountNumber++;
-            return true;
-        }
+        memset(buffer_mem, 0, bufSize * sizeof(uint8_t) * 2);
+
+        uint8_t *buf0 = (uint8_t *)buffer_mem;
+        uint8_t *buf1 = (uint8_t *)buffer_mem + bufSize;
+        PingPongBuffer_Init(&account->BufferManager, buf0, buf1);
+        DC_LOG_INFO("Account[%s] cached %d x2 bytes", id, bufSize);
+    }
+
+    // 3. Allocate List Node
+    AccountPoolList *newList = (AccountPoolList *)_MALLOC(sizeof(AccountPoolList));
+    if (newList == NULL)
+    {
+        DC_LOG_ERROR("Malloc list node failed");
+        goto ErrorHandler_FreeBuffer;
+    }
+    memset(newList, 0, sizeof(AccountPoolList));
+    newList->account = account;
+    newList->next = NULL;
+
+    // 4. Link to Manager
+    if (g_accountManager->Head == NULL)
+    {
+        g_accountManager->Head = newList;
     }
     else
     {
-        return false;
+        g_accountManager->Tail->next = newList;
     }
+    g_accountManager->Tail = newList;
+    g_accountManager->AccountNumber++;
+
+    return true;
+
+// Error Handling / Cleanup
+ErrorHandler_FreeBuffer:
+    if (buffer_mem)
+        _FREE(buffer_mem);
+
+ErrorHandler_FreeAccount:
+    _FREE(account);
+    return false;
 }
+
 static bool AcctManager_accountPoolNodeDelete(AccountPoolList *node, const char *id)
 {
     AccountPoolList *tempNode = NULL;
@@ -149,7 +171,7 @@ static bool AcctManager_accountPoolNodeDelete(AccountPoolList *node, const char 
                     if (tempNode->next)
                     {
                         nextNode = tempNode->next;
-                        HeapManager_free(tempNode);
+                        _FREE(tempNode);
                         if (preNode)
                         {
                             preNode->next = nextNode;
@@ -161,12 +183,12 @@ static bool AcctManager_accountPoolNodeDelete(AccountPoolList *node, const char 
                     }
                     else if (preNode) // If it is the tail node
                     {
-                        HeapManager_free(tempNode);
+                        _FREE(tempNode);
                         preNode->next = NULL;
                     }
                     else // If it is the head node and also the last node
                     {
-                        HeapManager_free(tempNode); // Free the node
+                        _FREE(tempNode); // Free the node
                         node->account->subscribers = NULL;
                     }
                     break;
@@ -179,12 +201,12 @@ static bool AcctManager_accountPoolNodeDelete(AccountPoolList *node, const char 
         if (node->next)
         {
             tempNode = node->next;
-            HeapManager_free(node);
+            _FREE(node);
             node = tempNode;
         }
         else
         {
-            HeapManager_free(node);
+            _FREE(node);
             break;
         }
     }
@@ -194,177 +216,116 @@ static bool AcctManager_accountPoolNodeDelete(AccountPoolList *node, const char 
  * @param  id
  * @retval true if success
  */
+
 bool AccountManager_DeleteAccount(const char *id)
 {
-    AccountPoolList *node = g_accountManager->Head;
-    AccountPoolList *tempNode = NULL;
-    AccountPoolList *preNode = NULL;
-    AccountPoolList *nextNode = NULL;
-    Account *account = AccountManager_searchAccount(node, id);
-    if (account)
+    Account *accountToDelete = AccountManager_searchAccount(g_accountManager->Head, id);
+    if (!accountToDelete)
     {
-        if (account->BufferSize)
-        {
-            HeapManager_free(account->BufferManager.buffer[0]);
-        }
-        node = account->publishers;
-        // Free the publishers pool 
-        while (node)
-        {
-            {
-                // Go to the publisher pool and Delete the this account
-                tempNode = node->account->subscribers;
-                while (tempNode)
-                {
-                    if (tempNode->account == account)
-                    {
-                        // Check if the node is the head node or the end node
-                        if (tempNode->next)
-                        {
-                            nextNode = tempNode->next;
-                            HeapManager_free(tempNode);
-
-                            if (preNode)
-                            {
-                                preNode->next = nextNode;
-                            }
-                            else // If it is the head node
-                            {
-                                node->account->subscribers = nextNode;
-                            }
-                        }
-                        else if (preNode) // If it is the tail node
-                        {
-                            HeapManager_free(tempNode);
-                            preNode->next = NULL;
-                        }
-                        else // If it is the head node and also the last node
-                        {
-                            HeapManager_free(tempNode); // Free the node
-                            node->account->subscribers = NULL;
-                        }
-                        break;
-                    }
-                    preNode = tempNode;
-                    tempNode = tempNode->next;
-                }
-            }
-            // if still follow
-            if (node->next)
-            {
-                tempNode = node->next;
-                HeapManager_free(node);
-                node = tempNode;
-            }
-            else
-            {
-                HeapManager_free(node);
-                break;
-            }
-        }
-
-        node = account->subscribers;
-        preNode = NULL;
-        tempNode = NULL;
-        // Free the subscribers pool
-        while (node)
-        {
-            {
-                // Delete the sub account
-                tempNode = node->account->publishers;
-                while (tempNode)
-                {
-                    if (tempNode->account == account)
-                    {
-                        // Check if the node is not the end node
-                        if (tempNode->next != NULL)
-                        {
-                            nextNode = tempNode->next;
-                            HeapManager_free(tempNode);
-                            if (preNode)
-                            {
-                                preNode->next = nextNode;
-                            }
-                            else
-                            {
-                                node->account->publishers = nextNode;
-                            }
-                        }
-                        else if (preNode) // If it is the tail node
-                        {
-                            HeapManager_free(tempNode);
-                            preNode->next = NULL;
-                        }
-                        else
-                        {
-                            HeapManager_free(tempNode);
-                            node->account->publishers = NULL;
-                        }
-                        break;
-                    }
-                    preNode = tempNode;
-                    tempNode = tempNode->next;
-                }
-            }
-            if (node->next)
-            {
-                tempNode = node->next;
-                HeapManager_free(node);
-                node = tempNode;
-            }
-            else
-            {
-                HeapManager_free(node);
-                break;
-            }
-        }
-        node = g_accountManager->Head;
-        preNode = NULL;
-        nextNode = NULL;
-        {
-            while (node)
-            {
-                if (node->account == account)
-                {
-                    if (node->next)
-                    {
-                        nextNode = node->next;
-                        HeapManager_free(node);
-                        if (preNode)
-                        {
-                            preNode->next = nextNode;
-                        }
-                        else
-                        {
-                            g_accountManager->Head = nextNode;
-                        }
-                    }
-                    // The node is the head node or the tail node
-                    else if (preNode != NULL)
-                    {
-                        preNode->next = NULL;
-                        HeapManager_free(node);
-                    }
-                    else
-                    {
-                        HeapManager_free(g_accountManager->Head);
-                        g_accountManager->Head = NULL;
-                    }
-                    break;
-                }
-                preNode = node;
-                node = node->next;
-            }
-        }
-        HeapManager_free(account);
-        g_accountManager->AccountNumber--;
-    }
-    else
-    {
-        DC_LOG_ERROR("Account[%s] is not crated !!!!!!", id);
+        DC_LOG_ERROR("Account[%s] not found for deletion", id);
         return false;
     }
+
+    // 1. Free Buffer Memory
+    if (accountToDelete->BufferSize > 0 && accountToDelete->BufferManager.buffer[0])
+    {
+        _FREE(accountToDelete->BufferManager.buffer[0]);
+    }
+
+    // 2. Unsubscribe from all publishers (I am leaving, remove me from their lists)
+    // accountToDelete->publishers contains the list of people I listen to.
+    AccountPoolList *currNode = accountToDelete->publishers;
+    while (currNode)
+    {
+        AccountPoolList *nextNode = currNode->next; // Save next before processing
+        
+        Account *publisher = currNode->account;
+        if (publisher)
+        {
+            // Remove 'accountToDelete' from 'publisher->subscribers'
+            AccountPoolList *pNode = publisher->subscribers;
+            AccountPoolList *pPre = NULL;
+            while (pNode)
+            {
+                if (pNode->account == accountToDelete)
+                {
+                    if (pPre) pPre->next = pNode->next;
+                    else publisher->subscribers = pNode->next;
+                    _FREE(pNode);
+                    break;
+                }
+                pPre = pNode;
+                pNode = pNode->next;
+            }
+        }
+        _FREE(currNode); // Free my list node
+        currNode = nextNode;
+    }
+    accountToDelete->publishers = NULL;
+
+    // 3. Remove all my subscribers 
+    // accountToDelete->subscribers contains the list of people listening to me.
+    currNode = accountToDelete->subscribers;
+    while (currNode)
+    {
+        AccountPoolList *nextNode = currNode->next; // Save next
+        
+        Account *subscriber = currNode->account;
+        if (subscriber)
+        {
+            // Remove 'accountToDelete' from 'subscriber->publishers'
+            AccountPoolList *sNode = subscriber->publishers;
+            AccountPoolList *sPre = NULL;
+            while (sNode)
+            {
+                if (sNode->account == accountToDelete)
+                {
+                    if (sPre) sPre->next = sNode->next;
+                    else subscriber->publishers = sNode->next;
+                    _FREE(sNode);
+                    break;
+                }
+                sPre = sNode;
+                sNode = sNode->next;
+            }
+        }
+        _FREE(currNode); // Free my list node
+        currNode = nextNode;
+    }
+    accountToDelete->subscribers = NULL;
+
+    // 4. Remove from AccountManager Global List
+    AccountPoolList *mgrNode = g_accountManager->Head;
+    AccountPoolList *mgrPre = NULL;
+    while (mgrNode)
+    {
+        if (mgrNode->account == accountToDelete)
+        {
+            if (mgrPre)
+            {
+                mgrPre->next = mgrNode->next;
+                if (mgrNode == g_accountManager->Tail) g_accountManager->Tail = mgrPre;
+            }
+            else
+            {
+                g_accountManager->Head = mgrNode->next;
+                if (mgrNode == g_accountManager->Tail) g_accountManager->Tail = NULL;
+            }
+            _FREE(mgrNode);
+            break;
+        }
+        mgrPre = mgrNode;
+        mgrNode = mgrNode->next;
+    }
+
+    // 5. Finally Free the Account Struct
+    _FREE(accountToDelete);
+    g_accountManager->AccountNumber--;
+    
+    DC_LOG_INFO("Account[%s] deleted", id);
+    return true;
 }
+
 static Account *AccountManager_searchAccount(AccountPoolList *node, const char *ID)
 {
     Account *account = NULL;
@@ -480,7 +441,7 @@ bool Account_subscribe(const char *accountID, const char *subID)
             return false;
         }
         // Create a new node
-        AccountPoolList *newNode = (AccountPoolList *)HeapManager_malloc(sizeof(AccountPoolList));
+        AccountPoolList *newNode = (AccountPoolList *)_MALLOC(sizeof(AccountPoolList));
         memset(newNode, 0, sizeof(AccountPoolList));
 
         if (newNode)
@@ -505,7 +466,7 @@ bool Account_subscribe(const char *accountID, const char *subID)
             }
         }
         // Create a new node
-        newNode = (AccountPoolList *)HeapManager_malloc(sizeof(AccountPoolList));
+        newNode = (AccountPoolList *)_MALLOC(sizeof(AccountPoolList));
         memset(newNode, 0, sizeof(AccountPoolList));
         if (newNode)
         {
@@ -562,12 +523,12 @@ bool Account_unsubscribe(const char *accountID, const char *subID)
         }
         while (node)
         {
-            if (strcmp(node->account->ID, subID))
+            if (strcmp(node->account->ID, subID) == 0)
             {
                 if (node->next)
                 {
                     nextNode = node->next;
-                    HeapManager_free(node);
+                    _FREE(node);
                     if (preNode)
                     {
                         preNode->next = nextNode;
@@ -580,11 +541,11 @@ bool Account_unsubscribe(const char *accountID, const char *subID)
                 else if (preNode) // tail node
                 {
                     preNode->next = NULL;
-                    HeapManager_free(node);
+                    _FREE(node);
                 }
                 else // The only node
                 {
-                    HeapManager_free(node); // Free the node
+                    _FREE(node); // Free the node
                     Subscriber->publishers = NULL;
                 }
                 break;
@@ -602,7 +563,7 @@ bool Account_unsubscribe(const char *accountID, const char *subID)
                 if (node->next)
                 {
                     nextNode = node->next;
-                    HeapManager_free(node);
+                    _FREE(node);
                     if (preNode)
                     {
                         preNode->next = nextNode;
@@ -615,11 +576,11 @@ bool Account_unsubscribe(const char *accountID, const char *subID)
                 else if (preNode) // tail node
                 {
                     preNode->next = NULL;
-                    HeapManager_free(node);
+                    _FREE(node);
                 }
                 else // The only node
                 {
-                    HeapManager_free(node); // Free the node
+                    _FREE(node); // Free the node
                     account->subscribers = NULL;
                 }
                 break;

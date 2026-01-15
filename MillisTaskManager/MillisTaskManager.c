@@ -2,32 +2,37 @@
  * \file   MillisTaskManager.c
  * \brief  MillisTaskManager
  *
- * - Responsible Engineer:Jeffer Chen
  *
  * - Description: This file implments MillisTaskManager
  *
  *   Modify from C++ vertion (by _FASTSHEET) to
  * - Created on: Feb 12, 2024
- * - Author: Jeffer Chen
- * - GitHub:StrugglingBunny
+ * - Author: StrugglingBunny
  * - Component needed
  *             HeapManager
  */
 #include "MillisTaskManager.h"
 #include "HeapManager.h"
 
+
+
+#define __MALLOC heap_mgr_malloc
+#define __REALLOC heap_mgr_realloc
+#define __FREE heap_mgr_free
+
+
+
 #define TASK_NEW(task)                                       \
     do                                                       \
     {                                                        \
-        task = (Task_t *)HeapManager_malloc(sizeof(Task_t)); \
+        task = (Task_t *)__MALLOC(sizeof(Task_t)); \
         memset(task, 0, sizeof(Task_t));                     \
     } while (0)
 #define TASK_DEL(task)          \
     do                          \
     {                           \
-        HeapManager_free(task); \
+        __FREE(task); \
     } while (0)
-
 static Task_t *MillisTaskManager_findTask(TaskFunction_t func);
 
 static MillisTaskManager *TaskManager = NULL;
@@ -39,7 +44,7 @@ static MillisTaskManager *TaskManager = NULL;
  */
 void MillisTaskManager_Init(bool priorityEnable)
 {
-    TaskManager = (MillisTaskManager *)HeapManager_malloc(sizeof(MillisTaskManager));
+    TaskManager = (MillisTaskManager *)__MALLOC(sizeof(MillisTaskManager));
     if (TaskManager)
     {
         TaskManager->Head = NULL;
@@ -65,7 +70,7 @@ void MillisTaskManager_DeInit()
     }
     if (TaskManager)
     {
-        HeapManager_free(TaskManager);
+        __FREE(TaskManager);
     }
 }
 /**
@@ -79,14 +84,14 @@ static Task_t *MillisTaskManager_findTask(TaskFunction_t func)
     Task_t *task = NULL;
     while (true)
     {
-        if (now == NULL) 
+        if (now == NULL) // 当前节点是否为空
             break;
-        if (now->Function == func)
+        if (now->Function == func) // 判断函数地址是否相等
         {
             task = now;
             break;
         }
-        now = now->Next;
+        now = now->Next; // 移动到下一个节点
     }
     return task;
 }
@@ -113,21 +118,27 @@ Task_t *MillisTaskManager_register(TaskFunction_t func, uint32_t timeMs, bool st
         return NULL;
     }
     task->param = param;
-    task->Function = func; 
-    task->Time = timeMs;   
-    task->State = state;   
-    task->TimePrev = 0;   
-    task->TimeCost = 0;  
-    task->TimeError = 0;  
-    task->Next = NULL;    
+    task->Function = func; // 任务回调函数
+    task->Time = timeMs;   // 任务执行周期
+    task->State = state;   // 任务状态
+    task->TimePrev = 0;    // 上一次时间
+    task->TimeCost = 0;    // 时间开销
+    task->TimeError = 0;   // 误差时间
+    task->Next = NULL;     // 下一个节点
+
+    /*如果任务链表为空*/
     if (TaskManager->Head == NULL)
     {
+        /*将当前任务作为链表的头*/
         TaskManager->Head = task;
     }
     else
     {
+        /*从任务链表尾部添加任务*/
         TaskManager->Tail->Next = task;
     }
+
+    /*将当前任务作为链表的尾*/
     TaskManager->Tail = task;
     return task;
 }
@@ -138,9 +149,9 @@ Task_t *MillisTaskManager_register(TaskFunction_t func, uint32_t timeMs, bool st
  */
 Task_t *MillisTaskManager_getPrevNode(Task_t *task)
 {
-    Task_t *now = TaskManager->Head; 
-    Task_t *prev = NULL;            
-    Task_t *retval = NULL;         
+    Task_t *now = TaskManager->Head; // 当前节点
+    Task_t *prev = NULL;             // 前一节点
+    Task_t *retval = NULL;           // 被返回的节点
     while (true)
     {
         if (now == NULL)
@@ -168,8 +179,8 @@ bool MillisTaskManager_Unregister(TaskFunction_t func)
     Task_t *task = MillisTaskManager_findTask(func);
     if (task == NULL)
         return false;
-    Task_t *prev = MillisTaskManager_getPrevNode(task); 
-    Task_t *next = task->Next;                         
+    Task_t *prev = MillisTaskManager_getPrevNode(task); // 前一个节点
+    Task_t *next = task->Next;                          // 后一个节点
     if (prev == NULL && next != NULL)
     {
         TaskManager->Head = next;

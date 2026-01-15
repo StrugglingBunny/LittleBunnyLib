@@ -2,67 +2,54 @@
  * \file   HeapManager.c
  * \brief  Manage heap
  *
- * - Responsible Engineer:Jeffer Chen
  *
  * - Description: This file implments heap
  *
- * - Created on: Feb 12, 2024
- * 
- * - Author:  CJourneys  & Jeffer Chen
+ * - Created on: Jan 13, 2026
+ *
+ * - Author: StrugglingBunny
  * - GitHub:StrugglingBunny
  */
 #include "HeapManager.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-static bool HeapManager_checkHeapPool(void);
-static bool HeapManager_checkHeapBlock(void *ptr, int *size);
-static HeapBlockList *HeapManager_getFreeBlock(uint32_t size, bool *memCut);
-static HeapBlockList *HeapManager_getFreeBlock(uint32_t size, bool *memCut);
-static uint32_t HeapManager_getMaxFreeBlockSize(void);
+static void __enter_critical();
+static void __exit_critical();
+static void *__internal_malloc(uint32_t size);
+static void __internal_free(void *ptr);
 
-static HeapManager g_HeapManager;
+static bool __heap_mgr_checkHeapPool(void);
+static bool __heap_mgr_checkHeapBlock(void *ptr, uint32_t *size);
+static HeapBlockList *__heap_mgr_getFreeBlock(uint32_t size, bool *memCut);
+static uint32_t __heap_mgr_getMaxFreeBlockSize(void);
+
+static HeapManager __heapMgr;
+
 /**
- * @brief  Initilize the Heap Pool Manager
- * @param  buffer
- * @param  size
- * @retval size
- */
-void HeapManager_Init(uint8_t *buffer, uint32_t size)
-{
-    g_HeapManager.heapEnd = &buffer[size];
-    g_HeapManager.heapTop = buffer;
-    g_HeapManager.heapTotalSize = size;
-    g_HeapManager.head = (HeapBlockList *)g_HeapManager.heapTop;
-    g_HeapManager.head->size = g_HeapManager.heapTotalSize - sizeof(HeapBlockList);
-    g_HeapManager.head->isOccupied = 0;
-    g_HeapManager.head->next = NULL;
-    HEAP_MANAGER_INFO("HeapManager Initilize successfully adress:%p ,size : %d KB\n", g_HeapManager.heapTop, size / 1024);
-}
-/**
- * @brief  Malloc memery from Heap manager
+ * @brief  Internal malloc memery from Heap manager
  * @param  size
  * @retval Adress of the block
  */
-void *HeapManager_malloc(int size)
+static void *__internal_malloc(uint32_t size)
 {
-    int free_size = HeapManager_getMaxFreeBlockSize();
+    uint32_t free_size = __heap_mgr_getMaxFreeBlockSize();
     if (size && free_size >= size)
     {
-        HeapBlockList *ptr = g_HeapManager.head;
+        HeapBlockList *ptr = __heapMgr.head;
         HeapBlockList *free_block = NULL;
-        int n = size / sizeof(void *);
-        int currentSize = n * sizeof(void *);
+        uint32_t n = size / sizeof(void *);
+        uint32_t currentSize = n * sizeof(void *);
         if (size % sizeof(void *) != 0)
         {
             currentSize += sizeof(void *);
         }
         bool isNeedCut = false;
-        HeapBlockList *node = HeapManager_getFreeBlock(currentSize, &isNeedCut);
+        HeapBlockList *node = __heap_mgr_getFreeBlock(currentSize, &isNeedCut);
         if (node == NULL)
         {
             HEAP_MANAGER_INFO("malloc size = %d faile !!!!!\n", size);
-            HeapManager_logHeapPool();
+            heap_mgr_logHeapPool();
             return (void *)(NULL);
         }
         node->isOccupied = 1;
@@ -74,125 +61,78 @@ void *HeapManager_malloc(int size)
             free_block->size = node->size - currentSize - sizeof(HeapBlockList);
             free_block->isOccupied = 0;
             free_block->next = node->next;
+            free_block->prev = node;
+            if (free_block->next != NULL)
+            {
+                free_block->next->prev = free_block;
+            }
             node->next = free_block;
             node->size = currentSize;
         }
 
         p = (uint8_t *)node;
-        p += sizeof(HeapBlockList); // 偏移8个字节为真正使用的malloc地址
-        if (HeapManager_checkHeapPool() == false)
+        p += sizeof(HeapBlockList);
+        if (__heap_mgr_checkHeapPool() == false)
         {
+            node->isOccupied = 0;
             return NULL;
         }
-       
         return (void *)(p);
     }
 
     return NULL;
 }
 /**
- * @brief  Free memery from Heap manager
+ * @brief  Internal free memery from Heap manager
  * @param  ptr
  * @retval void
  */
-void HeapManager_free(void *ptr)
+static void __internal_free(void *ptr)
 {
-    if (ptr != NULL)
+    if (ptr == NULL)
+        return;
+    HeapBlockList *curr = (HeapBlockList *)((uint8_t *)ptr - sizeof(HeapBlockList));
+    if (curr < (HeapBlockList *)__heapMgr.heapTop || curr >= (HeapBlockList *)__heapMgr.heapEnd)
     {
-        if ((ptr > g_HeapManager.heapTop) && (ptr < g_HeapManager.heapEnd))
+        return;
+    }
+
+    curr->isOccupied = 0; // set to empty
+
+    //  (Merge Next)
+    //
+    HeapBlockList *next_node = curr->next;
+    if (next_node != NULL && next_node->isOccupied == 0)
+    {
+        curr->size += sizeof(HeapBlockList) + next_node->size;
+        curr->next = next_node->next;
+        if (curr->next != NULL)
         {
-
-            /* 计算地址对应的原始节点 */
-            HeapBlockList *source_node = (HeapBlockList *)((uint8_t *)ptr - sizeof(HeapBlockList));
-            //memset(ptr, 0, source_node->size);
-            /* 找到node的前一个节点和下一个节点 */
-            HeapBlockList *previous_node = g_HeapManager.head;
-            while (previous_node && previous_node->next != source_node)
-            {
-                previous_node = previous_node->next;
-            }
-            HeapBlockList *next_node = source_node->next;
-
-            source_node->isOccupied = 0;
-
-            HeapBlockList *connect_node;
-            if (previous_node && (previous_node->isOccupied == 0)) // 前一个节点是否空闲
-            {
-                connect_node = source_node->next;
-                int size = source_node->size + sizeof(HeapBlockList);
-
-                if (next_node && (next_node->isOccupied == 0)) // 下一个节点是否空闲
-                {
-                    connect_node = next_node->next;
-                    size += next_node->size + sizeof(HeapBlockList);
-                }
-                previous_node->next = connect_node;
-                previous_node->size += size;
-            }
-            else
-            {
-                connect_node = source_node->next;
-                int size = source_node->size;
-
-                if (next_node && (next_node->isOccupied == 0))
-                {
-                    connect_node = next_node->next;
-                    size += next_node->size + sizeof(HeapBlockList);
-                }
-                source_node->next = connect_node;
-                source_node->size = size;
-            }
+            curr->next->prev = curr;
         }
-        else
+    }
+    //  (Merge Prev)
+    HeapBlockList *prev_node = curr->prev;
+    if (prev_node != NULL && prev_node->isOccupied == 0)
+    {
+
+        prev_node->size += sizeof(HeapBlockList) + curr->size;
+        prev_node->next = curr->next;
+        if (prev_node->next != NULL)
         {
-            HEAP_MANAGER_INFO("HeapManager_free not allowd this address = %p(%p --- %p)\n", ptr, g_HeapManager.heapTop, g_HeapManager.heapEnd);
+            prev_node->next->prev = prev_node;
         }
     }
 }
-bool HeapManager_blockSizeAppend(uint8_t **addrToPtr, int32_t bytes)
-{
-    bool status = false;
-    int preSize = 0;
-    if (HeapManager_checkHeapBlock(*addrToPtr, &preSize) == true)
-    {
-        uint8_t *tempPtr;
-        if ((preSize + bytes) > 0)
-        {
-            tempPtr = HeapManager_malloc(preSize + bytes);
-            if (tempPtr != NULL)
-            {
-                if (bytes < 0)
-                {
-                    preSize += bytes;
-                }
-                for (uint32_t i = 0; i < preSize; i++)
-                {
-                    tempPtr[i] = (*addrToPtr)[i];
-                }
-                HeapManager_free(*addrToPtr);
-                if (HeapManager_checkHeapBlock(tempPtr, NULL) == true)
-                {
-                    *addrToPtr = tempPtr;
-                    status = true;
-                }
-            }
-        }
-        else
-        {
-            HeapManager_free(*addrToPtr);
-            status = true;
-        }
-    }
-    return (status);
-}
+
 /**
  * @brief  Get max free block size
  * @param  NONE
  * @retval size
  */
-static uint32_t HeapManager_getMaxFreeBlockSize(void)
+static uint32_t __heap_mgr_getMaxFreeBlockSize(void)
 {
-    HeapBlockList *node = g_HeapManager.head;
+    HeapBlockList *node = __heapMgr.head;
     uint32_t size = 0;
     while (node)
     {
@@ -212,9 +152,9 @@ static uint32_t HeapManager_getMaxFreeBlockSize(void)
  * @param  NONE
  * @retval size
  */
-static HeapBlockList *HeapManager_getFreeBlock(uint32_t size, bool *memCut)
+static HeapBlockList *__heap_mgr_getFreeBlock(uint32_t size, bool *memCut)
 {
-    HeapBlockList *current_node = g_HeapManager.head;
+    HeapBlockList *current_node = __heapMgr.head;
     HeapBlockList *ret_node = NULL;
     uint32_t min_size = 0xffffffff;
     *memCut = false;
@@ -240,31 +180,19 @@ static HeapBlockList *HeapManager_getFreeBlock(uint32_t size, bool *memCut)
     }
     return ret_node;
 }
-/**
- * @brief  Get Heap block Pool Infor
- * @param  NONE
- * @retval size
- */
-void HeapManager_logHeapPool(void)
-{
-    HeapBlockList *node = g_HeapManager.head;
-    while (node)
-    {
-        HEAP_MANAGER_INFO("address = %p, is used = %d, next = %p, size = %d\n", node, node->isOccupied, node->next, node->size);
-        node = node->next;
-    }
-}
+
 /**
  * @brief Check Heap block Pool
  * @param  NONE
  * @retval size
  */
-static bool HeapManager_checkHeapPool(void)
+static bool __heap_mgr_checkHeapPool(void)
 {
-    HeapBlockList *node = g_HeapManager.head;
+#if HEAP_DEBUG_CHECK == 1
+    HeapBlockList *node = __heapMgr.head;
     bool status = true;
-    int size = 0;
-    int cnt = 0;
+    uint32_t size = 0;
+    uint32_t cnt = 0;
 
     while (node)
     {
@@ -273,13 +201,16 @@ static bool HeapManager_checkHeapPool(void)
         node = node->next;
     }
 
-    if (size < (g_HeapManager.heapTotalSize - cnt * sizeof(HeapBlockList)))
+    if (size < (__heapMgr.heapTotalSize - cnt * sizeof(HeapBlockList)))
     {
-        HEAP_MANAGER_INFO("HeapManager_checkHeapPool err now only have %d block, size = %d!!!\n", cnt, size);
-        HeapManager_logHeapPool();
+        HEAP_MANAGER_INFO("__heap_mgr_checkHeapPool err now only have %d block, size = %d!!!\n", cnt, size);
+        heap_mgr_logHeapPool();
         status = false;
     }
     return status;
+#else
+    return true;
+#endif
 }
 
 /**
@@ -287,23 +218,23 @@ static bool HeapManager_checkHeapPool(void)
  * @param  NONE
  * @retval size
  */
-static bool HeapManager_checkHeapBlock(void *ptr, int *size)
+static bool __heap_mgr_checkHeapBlock(void *ptr, uint32_t *size)
 {
-    if ((ptr < g_HeapManager.heapTop) || (ptr > g_HeapManager.heapEnd))
+    if ((ptr < __heapMgr.heapTop) || (ptr > __heapMgr.heapEnd))
     {
         return false; // Adress no valid
     }
-    HeapBlockList *node = g_HeapManager.head;
+    HeapBlockList *node = __heapMgr.head;
     uint8_t *current_p = NULL;
     while (node)
     {
-        int current_size = node->size;
+        uint32_t current_size = node->size;
         current_p = (uint8_t *)node + sizeof(HeapBlockList);
         if ((ptr == current_p) && (ptr < (current_p + current_size)))
         {
             if (node->isOccupied == 0)
             {
-                HEAP_MANAGER_INFO("HeapManager_checkHeapBlock this address = %p is not active !!\n", ptr);
+                HEAP_MANAGER_INFO("__heap_mgr_checkHeapBlock this address = %p is not active !!\n", ptr);
                 return false;
             }
             else
@@ -317,17 +248,177 @@ static bool HeapManager_checkHeapBlock(void *ptr, int *size)
     }
     return false;
 }
-HeapBlockList *HeapManager_getHeapBlock(void *ptr)
+static void *__internal_heap_mgr_realloc(void *ptr, uint32_t new_size)
 {
-    if ((ptr < g_HeapManager.heapTop) || (ptr > g_HeapManager.heapEnd))
+
+    if (ptr == NULL)
+    {
+        return __internal_malloc(new_size);
+    }
+    if (new_size == 0)
+    {
+        __internal_free(ptr);
+        return NULL;
+    }
+    uint32_t preSize = 0;
+    if ((ptr < __heapMgr.heapTop) || (ptr >= __heapMgr.heapEnd))
+    {
+        return NULL;
+    }
+    HeapBlockList *node = (HeapBlockList *)((uint8_t *)ptr - sizeof(HeapBlockList));
+    uint32_t old_size = node->size;
+    if (old_size >= new_size)
+    {
+        return ptr;
+    }
+    void *new_ptr = __internal_malloc(new_size);
+    if (new_ptr != NULL)
+    {
+        memcpy(new_ptr, ptr, old_size);
+        __internal_free(ptr);
+        return new_ptr;
+    }
+    return NULL;
+}
+
+static void __enter_critical()
+{
+    if (__heapMgr.enter_critical && __heapMgr.exit_critical)
+    {
+        __heapMgr.enter_critical();
+    }
+}
+static void __exit_critical()
+{
+    if (__heapMgr.enter_critical && __heapMgr.exit_critical)
+    {
+        __heapMgr.exit_critical();
+    }
+}
+
+/************************** Public function ****************************************** */
+
+/**
+ * @brief  Initilize the Heap Pool Manager
+ * @param  buffer
+ * @param  size
+ * @retval size
+ */
+void heap_mgr_init(uint8_t *buffer, uint32_t size, void (*enter_critical)(void), void (*exit_critical)(void))
+{
+    // 1. Calculate aligned address
+    uintptr_t addr = (uintptr_t)buffer;
+    uintptr_t aligned_addr = (addr + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+    // 2. Calculate the lost bytes
+    uint32_t offset = aligned_addr - addr;
+    __heapMgr.heapTop = (void *)aligned_addr;
+    __heapMgr.heapTotalSize = size - offset;
+    __heapMgr.heapEnd = (uint8_t *)__heapMgr.heapTop + __heapMgr.heapTotalSize;
+    __heapMgr.head = (HeapBlockList *)__heapMgr.heapTop;
+    __heapMgr.head->size = __heapMgr.heapTotalSize - sizeof(HeapBlockList);
+    __heapMgr.head->isOccupied = 0;
+    __heapMgr.head->next = NULL;
+    __heapMgr.head->prev = NULL;
+    __heapMgr.isEnable = true;
+    __heapMgr.enter_critical = enter_critical;
+    __heapMgr.exit_critical = exit_critical;
+    HEAP_MANAGER_INFO("HeapManager Initilize successfully adress:%p ,size : %d KB\n", __heapMgr.heapTop, size / 1024);
+}
+/**
+ * @brief  Check if the heap manager is already been initilized
+ * @param  void
+ * @retval true if heap manager is initilized
+ */
+bool heap_mgr_isInitilized()
+{
+    return __heapMgr.isEnable;
+}
+/**
+ * @brief  Allocate memory and initialize
+ * @param  size: Size
+ * @retval Pointer to the allocated memory
+ */
+void *heap_mgr_malloc(uint32_t size)
+{
+    void *p = NULL;
+    __enter_critical();
+    p = __internal_malloc(size);
+    __exit_critical();
+    return p;
+}
+/**
+ * @brief  Free the allocated memory
+ * @retval void
+ */
+void heap_mgr_free(void *ptr)
+{
+    __enter_critical();
+    __internal_free(ptr);
+    __exit_critical();
+}
+/**
+ * @brief  Reallocate memory
+ * @param  addrToPtr: Allocated memory address
+ * @param  size: new size of the memory
+ * @retval Pointer to the allocated memory
+ */
+void *heap_mgr_realloc(void *ptr, uint32_t new_size)
+{
+    __enter_critical();
+    void *_ptr = __internal_heap_mgr_realloc(ptr, new_size);
+    __exit_critical();
+    return _ptr;
+}
+/**
+ * @brief  Allocate memory and initialize to zero (calloc)
+ * @param  nmemb: Number of elements
+ * @param  size: Size of each element
+ * @retval Pointer to the allocated memory
+ */
+void *heap_mgr_calloc(uint32_t nmemb, uint32_t size)
+{
+    if (nmemb && size > (0xFFFFFFFF / nmemb))
+    {
+        return NULL;
+    }
+    uint32_t total_size = nmemb * size;
+    void *ptr = heap_mgr_malloc(total_size);
+    if (ptr != NULL)
+    {
+        memset(ptr, 0, total_size);
+    }
+    return ptr;
+}
+/**
+ * @brief  Get Heap block Pool Infor
+ * @param  NONE
+ * @retval size
+ */
+void heap_mgr_logHeapPool(void)
+{
+    HeapBlockList *node = __heapMgr.head;
+    while (node)
+    {
+        HEAP_MANAGER_INFO("address = %p, is used = %d, next = %p, size = %d\n", node, node->isOccupied, node->next, node->size);
+        node = node->next;
+    }
+}
+/**
+ * @brief  Get the block
+ * @param  ptr block address
+ * @retval block infor
+ */
+HeapBlockList *heap_mgr_getHeapBlock(void *ptr)
+{
+    if ((ptr < __heapMgr.heapTop) || (ptr > __heapMgr.heapEnd))
     {
         return NULL; // Adress no valid
     }
-    HeapBlockList *node = g_HeapManager.head;
+    HeapBlockList *node = __heapMgr.head;
     uint8_t *current_p = NULL;
     while (node)
     {
-        int current_size = node->size;
+        uint32_t current_size = node->size;
         current_p = (uint8_t *)node + sizeof(HeapBlockList);
         if ((ptr == current_p) && (ptr < (current_p + current_size)))
         {

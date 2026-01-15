@@ -6,6 +6,7 @@ extern "C"
 #endif
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #define HEAP_MANAGER_USE_LOG 1
 
 #if (HEAP_MANAGER_USE_LOG == 1)
